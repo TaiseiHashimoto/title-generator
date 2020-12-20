@@ -1,0 +1,6 @@
+data/arxiv-metadata-oai-snapshot.json
+jupyter/
+mlruns/
+__pycache__/
+sftp-config.json
+*.sh
