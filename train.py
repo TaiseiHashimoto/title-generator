@@ -34,12 +34,12 @@ def evaluate_tf(update_step):
 
     for batch_raw in data_val:
         with torch.no_grad():
-            output, style_encoder_dist, style_encoder_sampled = model(batch_raw)
+            output, styenc_dist, styenc_sampled = model(batch_raw)
 
         ce_loss = output.loss.item()
         ce_loss_all.append(ce_loss)
         if args.encode_style:
-            kl_loss = div_from_prior(style_encoder_dist).mean().item()
+            kl_loss = div_from_prior(styenc_dist).mean().item()
             kl_loss_all.append(kl_loss)
             loss_all.append(ce_loss + kl_loss * args.kl_weight)
         else:
@@ -53,7 +53,7 @@ def evaluate_tf(update_step):
 
 def evaluate_gen(epoch, num_samples=20):
     model.eval()
-    metric = load_metric("rouge")
+    metric = load_metric("rouge", experiment_id=run.info.run_id)
     samples = []
 
     for batch_raw in data_val:
@@ -105,11 +105,11 @@ def train():
             update_step += 1
 
             model.train()
-            output, style_encoder_dist, style_encoder_sampled = model(batch_raw)
-            
+            output, styenc_dist, styenc_sampled = model(batch_raw)
+
             ce_loss = output.loss
             if args.encode_style:
-                kl_loss = div_from_prior(style_encoder_dist).mean()
+                kl_loss = div_from_prior(styenc_dist).mean()
                 loss = ce_loss + kl_loss * args.kl_weight
             else:
                 loss = ce_loss
@@ -123,10 +123,10 @@ def train():
                 mlflow.log_metric('loss_train', loss.item(), update_step)
                 if args.encode_style:
                     mlflow.log_metric('kl_loss_train', kl_loss.item(), update_step)
-                    style_encoder_loc = style_encoder_dist.loc.abs().mean().item()
-                    style_encoder_scale = style_encoder_dist.scale.mean().item()
-                    mlflow.log_metric('style_encoder_loc', style_encoder_loc, update_step)
-                    mlflow.log_metric('style_encoder_scale', style_encoder_scale, update_step)
+                    styenc_loc = styenc_dist.loc.abs().mean().item()
+                    styenc_scale = styenc_dist.scale.mean().item()
+                    mlflow.log_metric('styenc_loc', styenc_loc, update_step)
+                    mlflow.log_metric('styenc_scale', styenc_scale, update_step)
 
             if update_step % args.eval_freq == 0:
                 evaluate_tf(update_step)
@@ -146,26 +146,24 @@ def train():
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('exp_name', type=str)
-    parser.add_argument('--batch_size', type=int, default=1)
-    parser.add_argument('--num_epochs', type=int, default=1)
+    parser.add_argument('--batch_size', type=int, default=2)
+    parser.add_argument('--num_epochs', type=int, default=2)
     parser.add_argument('--num_beams', type=int, default=4)
     parser.add_argument('--model_lr', type=float, default=1e-5)
     parser.add_argument('--encode_style', action='store_true')
-    parser.add_argument('--style_encoder_layer', type=int, default=3)
-    parser.add_argument('--style_encoder_dim', type=int, default=32)
-    parser.add_argument('--style_encoder_ffn_dim', type=int, default=128)
-    parser.add_argument('--style_encoder_head', type=int, default=2)
-    parser.add_argument('--style_encoder_lr', type=float, default=1e-3)
-    parser.add_argument('--kl_weight', type=float, default=1.0)
+    parser.add_argument('--styenc_embedding_dim', type=int, default=32)
+    parser.add_argument('--styenc_code_dim', type=int, default=32)
+    parser.add_argument('--styenc_hidden_dim', type=int, default=64)
+    parser.add_argument('--styenc_lr', type=float, default=1e-4)
+    parser.add_argument('--kl_weight', type=float, default=1e-3)
     parser.add_argument('--log_freq', type=int, default=10)
     parser.add_argument('--eval_freq', type=int, default=1000)
     args = parser.parse_args()
 
     if not args.encode_style:
-        args.style_encoder_layer = None
-        args.style_encoder_dim = None
-        args.style_encoder_ffn_dim = None
-        args.style_encoder_head = None
+        args.styenc_embedding_dim = None
+        args.styenc_code_dim = None
+        args.styenc_hidden_dim = None
 
     with open('data/preprocessed.pkl', 'rb') as f:
         data = pickle.load(f)
@@ -176,39 +174,38 @@ if __name__ == '__main__':
 
     print("data loaded", flush=True)
 
+    device = 'cuda'
     model = arXivModel(
         model_name='google/pegasus-xsum',
         encode_style=args.encode_style,
-        style_encoder_layer=args.style_encoder_layer,
-        style_encoder_dim=args.style_encoder_dim,
-        style_encoder_ffn_dim=args.style_encoder_ffn_dim,
-        style_encoder_head=args.style_encoder_head,
-        device='cuda',
-    )
+        styenc_embedding_dim=args.styenc_embedding_dim,
+        styenc_code_dim=args.styenc_code_dim,
+        styenc_hidden_dim=args.styenc_hidden_dim,
+    ).to(device)
 
-    params = [{'params': model.model.parameters(), 'lr': args.model_lr}]
+    params = [{'params': model.model.parameters()}]
     if args.encode_style:
         params.extend([
-            {'params': model.style_encoder.parameters(), 'lr': args.style_encoder_lr},
-            {'params': model.projector.parameters(), 'lr': args.style_encoder_lr},
+            {'params': model.style_encoder.parameters(), 'lr': args.styenc_lr},
+            {'params': model.projector.parameters(), 'lr': args.styenc_lr},
         ])
 
-    optimizer = Adafactor(params, relative_step=False, scale_parameter=False)
+    optimizer = Adafactor(params, lr=args.model_lr, relative_step=False, scale_parameter=False)
 
     print("model loaded", flush=True)
 
     mlflow.set_experiment(args.exp_name)
+    run = mlflow.start_run()
     mlflow.log_params({
         'batch_size': args.batch_size,
         'num_epochs': args.num_epochs,
         'num_beams': args.num_beams,
         'model_lr': args.model_lr,
         'encode_style': args.encode_style,
-        'style_encoder_layer': args.style_encoder_layer,
-        'style_encoder_dim': args.style_encoder_dim,
-        'style_encoder_ffn_dim': args.style_encoder_ffn_dim,
-        'style_encoder_head': args.style_encoder_head,
-        'style_encoder_lr': args.style_encoder_lr,
+        'styenc_embedding_dim': args.styenc_embedding_dim,
+        'styenc_code_dim': args.styenc_code_dim,
+        'styenc_hidden_dim': args.styenc_hidden_dim,
+        'styenc_lr': args.styenc_lr,
         'kl_weight': args.kl_weight,
     })
 

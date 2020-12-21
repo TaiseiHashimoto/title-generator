@@ -4,3 +4,4 @@ mlruns/
 __pycache__/
 sftp-config.json
 *.sh
+tmp*.py

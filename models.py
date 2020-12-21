@@ -20,12 +20,11 @@ class arXivModel(nn.Module):
         self,
         model_name=None,
         checkpoint_path=None,
+        styenc_path=None,
         encode_style=False,
-        style_encoder_layer=None,
-        style_encoder_dim=None,
-        style_encoder_ffn_dim=None,
-        style_encoder_head=None,
-        device='cuda',
+        styenc_embedding_dim=None,
+        styenc_code_dim=None,
+        styenc_hidden_dim=None,
     ):
         super().__init__()
         self.tokenizer = PegasusTokenizer.from_pretrained('google/pegasus-xsum')
@@ -36,73 +35,34 @@ class arXivModel(nn.Module):
 
             with open(checkpoint_path / 'config.json', 'r') as f:
                 config = json.load(f)
+
             self.encode_style = config['encode_style']
-            self.style_encoder_layer = config['style_encoder_layer']
-            self.style_encoder_dim = config['style_encoder_dim']
-            self.style_encoder_ffn_dim = config['style_encoder_ffn_dim']
-            self.style_encoder_head = config['style_encoder_head']
-            self.device = config['device']
+            self.styenc_embedding_dim = config['styenc_embedding_dim']
+            self.styenc_code_dim = config['styenc_code_dim']
+            self.styenc_hidden_dim = config['styenc_hidden_dim']
         else:
             self.encode_style = encode_style
-            self.style_encoder_layer = style_encoder_layer
-            self.style_encoder_dim = style_encoder_dim
-            self.style_encoder_ffn_dim = style_encoder_ffn_dim
-            self.style_encoder_head = style_encoder_head
-            self.device = device
+            self.styenc_embedding_dim = styenc_embedding_dim
+            self.styenc_code_dim = styenc_code_dim
+            self.styenc_hidden_dim = styenc_hidden_dim
 
-        self.model = PegasusForConditionalGeneration.from_pretrained(model_name).to(device)
+        self.model = PegasusForConditionalGeneration.from_pretrained(model_name)
 
         if self.encode_style:
-            with open('data/pos_list.json', 'r') as f:
-                pos_list = json.load(f)
-
-            self.pos_voc = {'<mean>': 0, '<std>': 1, '<pad>': 2}
-            self.pos_voc.update({pos: i + 3 for i, pos in enumerate(pos_list)})
+            self.style_encoder = StyleEncoder(
+                self.styenc_embedding_dim,
+                self.styenc_code_dim,
+                self.styenc_hidden_dim,
+            )
+            self.projector = nn.Linear(self.styenc_code_dim, self.model.config.d_model)
 
             if checkpoint_path is not None:
-                style_encoder_path = checkpoint_path / 'style_encoder'
-                self.style_encoder = BartEncoder.from_pretrained(style_encoder_path).to(device)
-            else:
-                config = BartConfig(
-                    encoder_layers=self.style_encoder_layer,
-                    d_model=self.style_encoder_dim,
-                    encoder_ffn_dim=self.style_encoder_ffn_dim,
-                    encoder_attention_heads=self.style_encoder_head,
-                    vocab_size=len(self.pos_voc),
-                    max_position_embeddings=50,
-                    pad_token_id=self.pos_voc['<pad>'],
-                )
-                self.style_encoder = BartEncoder(config).to(device)
-
-            self.projector = nn.Linear(self.style_encoder_dim, self.model.config.d_model).to(device)
-            if checkpoint_path is not None:
+                styenc_path = checkpoint_path / 'style_encoder.pt'
                 projector_path = checkpoint_path / 'projector.pt'
+                self.style_encoder.load_state_dict(torch.load(styenc_path))
                 self.projector.load_state_dict(torch.load(projector_path))
-
-    def get_style_encoder_dist(self, title_pos):
-        max_len = max([len(tp) for tp in title_pos])
-
-        # pad title POS sequence
-        title_pos_ids = []
-        attention_mask = []
-        for tp in title_pos:
-            pad_len = max_len - len(tp)
-            tp_id = [self.pos_voc['<mean>'], self.pos_voc['<std>']] + \
-                      [self.pos_voc[p] for p in tp] + \
-                      [self.pos_voc['<pad>']] * (pad_len + 1)
-            title_pos_ids.append(tp_id)
-
-            atm = [1] * (len(tp) + 3) + [0] * pad_len
-            attention_mask.append(atm)
-
-        title_pos_ids = torch.tensor(title_pos_ids, device=self.device).long()
-        attention_mask = torch.tensor(attention_mask, device=self.device).long()
-        output = self.style_encoder(input_ids=title_pos_ids, attention_mask=attention_mask)
-
-        mean = output.last_hidden_state[:, 0]
-        std = F.softplus(output.last_hidden_state[:, 1])
-        dist = Normal(mean, std)
-        return dist
+            elif styenc_path is not None:
+                self.style_encoder.load_state_dict(torch.load(styenc_path))
 
     def encode(self, batch_raw, batch):
         batch_size = batch['input_ids'].shape[0]
@@ -114,13 +74,15 @@ class arXivModel(nn.Module):
 
         if self.encode_style:
             if 'title_pos' in batch_raw:
-                style_encoder_dist = self.get_style_encoder_dist(batch_raw['title_pos'])
-                style_encoder_sampled = style_encoder_dist.rsample()
+                # styenc_dist = self.get_styenc_dist(batch_raw['title_pos'])
+                styenc_dist = self.style_encoder(batch_raw['title_pos'])
+                styenc_sampled = styenc_dist.rsample()
             else:
-                style_encoder_sampled = torch.randn(batch_size, self.style_encoder_dim)
+                styenc_dist = None
+                styenc_sampled = torch.randn(batch_size, self.styenc_dim, device=self.device)
 
             encoder_outputs.last_hidden_state = torch.cat([
-                self.projector(style_encoder_sampled).unsqueeze(dim=1),
+                self.projector(styenc_sampled).unsqueeze(dim=1),
                 encoder_outputs.last_hidden_state,
             ], dim=1)
             batch['attention_mask'] = torch.cat([
@@ -128,10 +90,10 @@ class arXivModel(nn.Module):
                 batch['attention_mask'],
             ], dim=1)
         else:
-            style_encoder_dist = None
-            style_encoder_sampled = None
+            styenc_dist = None
+            styenc_sampled = None
 
-        return encoder_outputs, style_encoder_dist, style_encoder_sampled
+        return encoder_outputs, styenc_dist, styenc_sampled
 
     def forward(self, batch_raw):
         batch = self.tokenizer.prepare_seq2seq_batch(
@@ -140,7 +102,7 @@ class arXivModel(nn.Module):
             return_tensors="pt",
         ).to(self.device)
 
-        encoder_outputs, style_encoder_dist, style_encoder_sampled = self.encode(batch_raw, batch)
+        encoder_outputs, styenc_dist, styenc_sampled = self.encode(batch_raw, batch)
 
         outputs = self.model(
             encoder_outputs=encoder_outputs,
@@ -148,7 +110,7 @@ class arXivModel(nn.Module):
             labels=batch['labels'],
         )
 
-        return outputs, style_encoder_dist, style_encoder_sampled
+        return outputs, styenc_dist, styenc_sampled
 
     @torch.no_grad()
     def generate(self, batch_raw, num_beams, decoder_start_token_id=None):
@@ -157,13 +119,12 @@ class arXivModel(nn.Module):
             return_tensors="pt",
         ).to(self.device)
 
-        encoder_outputs, style_encoder_dist, style_encoder_sampled = self.encode(batch_raw, batch)
+        encoder_outputs, styenc_dist, styenc_sampled = self.encode(batch_raw, batch)
 
         max_length = self.model.config.max_length
         min_length = self.model.config.min_length
         pad_token_id = self.model.config.pad_token_id
         eos_token_id = self.model.config.eos_token_id
-        bos_token_id = self.model.config.bos_token_id
         batch_size = batch['input_ids'].shape[0]
 
         logits_processor = LogitsProcessorList()
@@ -208,14 +169,122 @@ class arXivModel(nn.Module):
         with open(path / 'config.json', 'w') as f:
             json.dump({
                 'encode_style': self.encode_style,
-                'style_encoder_layer': self.style_encoder_layer,
-                'style_encoder_dim': self.style_encoder_dim,
-                'style_encoder_ffn_dim': self.style_encoder_ffn_dim,
-                'style_encoder_head': self.style_encoder_head,
-                'device': self.device,
+                'styenc_embedding_dim': self.styenc_embedding_dim,
+                'styenc_code_dim': self.styenc_code_dim,
+                'styenc_hidden_dim': self.styenc_hidden_dim,
             }, f, indent=4)
 
         self.model.save_pretrained(path / 'model')
         if self.encode_style:
-            self.style_encoder.save_pretrained(path / 'style_encoder')
+            torch.save(self.style_encoder.state_dict(), path / 'style_encoder.pt')
             torch.save(self.projector.state_dict(), path / 'projector.pt')
+
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
+
+class StyleEncoder(nn.Module):
+    def __init__(
+        self,
+        embedding_dim,
+        code_dim,
+        hidden_dim,
+    ):
+        super().__init__()
+
+        with open('data/pos_list.json', 'r') as f:
+            pos_list = json.load(f)
+
+        self.pos_voc = {'<pad>': 0}
+        self.pos_voc.update({pos: i + 1 for i, pos in enumerate(pos_list)})
+
+        self.embedding = nn.Embedding(len(self.pos_voc), embedding_dim, padding_idx=0)
+        self.bilstm = nn.LSTM(embedding_dim, hidden_dim, batch_first=True, bidirectional=True)
+        self.fc = nn.Linear(hidden_dim * 2, code_dim * 2)
+
+    def forward(self, title_pos):
+        max_len = max([len(tp) for tp in title_pos])
+
+        # pad title POS sequence
+        title_pos_ids = []
+        for tp in title_pos:
+            pad_len = max_len - len(tp)
+            tp_id = [self.pos_voc[p] for p in tp] + [self.pos_voc['<pad>']] * pad_len
+            title_pos_ids.append(tp_id)
+
+        title_pos_ids = torch.tensor(title_pos_ids, device=self.device).long()
+        title_pos_embeds = self.embedding(title_pos_ids)
+
+        _, hc = self.bilstm(title_pos_embeds)
+        h = torch.cat([hc[0][0], hc[0][1]], dim=1)
+        output = self.fc(h)
+
+        mean, std = torch.chunk(output, 2, dim=1)
+        std = F.softplus(std)
+        dist = Normal(mean, std)
+        return dist
+
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
+
+class StyleDecoder(nn.Module):
+    def __init__(
+        self,
+        embedding,
+        code_dim,
+        hidden_dim,
+    ):
+        super().__init__()
+
+        with open('data/pos_list.json', 'r') as f:
+            pos_list = json.load(f)
+
+        self.pos_voc = {'<pad>': 0}
+        self.pos_voc.update({pos: i + 1 for i, pos in enumerate(pos_list)})
+
+        self.embedding = embedding
+        self.lstm = nn.LSTM(self.embedding.embedding_dim, hidden_dim, batch_first=True)
+        self.fc_in = nn.Linear(code_dim, hidden_dim)
+        self.fc_out = nn.Linear(hidden_dim, len(self.pos_voc))
+
+    def forward(self, title_pos, code):
+        max_len = max([len(tp) for tp in title_pos])
+
+        # pad title POS sequence
+        title_pos_ids = []
+        masks = []
+        for tp in title_pos:
+            pad_len = max_len - len(tp)
+            tp_id = [self.pos_voc['<pad>']] + \
+                     [self.pos_voc[p] for p in tp] + \
+                     [self.pos_voc['<pad>']] * pad_len
+            title_pos_ids.append(tp_id)
+            mask = [1.] * (len(tp) + 1) + [0.] * pad_len
+            masks.append(mask)
+
+        title_pos_ids = torch.tensor(title_pos_ids, device=self.device).long()
+        title_pos_embeds = self.embedding(title_pos_ids)
+        masks = torch.tensor(masks, device=self.device).float()
+
+        h0 = self.fc_in(code).unsqueeze(dim=0)
+        c0 = torch.zeros_like(h0)
+
+        output, _ = self.lstm(title_pos_embeds, (h0, c0))
+        logits = self.fc_out(output)
+
+        title_pos_target = torch.cat([title_pos_ids[:, 1:], title_pos_ids[:, :1]], dim=1)
+        loss = F.cross_entropy(
+            logits.view(-1, len(self.pos_voc)),
+            title_pos_target.view(-1),
+            reduction='none'
+        ).view(*masks.shape)
+        loss = (loss * masks).mean()
+
+        return loss
+
+    @property
+    def device(self):
+        return next(self.parameters()).device
