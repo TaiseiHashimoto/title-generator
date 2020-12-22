@@ -174,8 +174,9 @@ class StyleEncoder(nn.Module):
     def __init__(
         self,
         embedding_dim,
-        hidden_dim,
         code_dim,
+        num_layers,
+        hidden_dim,
     ):
         super().__init__()
         with open(Path('data', 'pos_list.json'), 'r') as f:
@@ -184,11 +185,12 @@ class StyleEncoder(nn.Module):
             self.pos_voc.update({pos: i + 1 for i, pos in enumerate(pos_list)})
 
         self.embedding_dim = embedding_dim
-        self.hidden_dim = hidden_dim
         self.code_dim = code_dim
+        self.num_layers = num_layers
+        self.hidden_dim = hidden_dim
         self.embedding = nn.Embedding(len(self.pos_voc), embedding_dim, padding_idx=0)
-        self.bilstm = nn.LSTM(embedding_dim, hidden_dim, batch_first=True, bidirectional=True)
-        self.fc = nn.Linear(hidden_dim * 2, code_dim * 2)
+        self.lstm = nn.LSTM(embedding_dim, hidden_dim, num_layers=num_layers, batch_first=True, bidirectional=True)
+        self.fc = nn.Linear((hidden_dim * 2) * num_layers, code_dim * 2)
 
     @classmethod
     def from_checkpoint(cls, checkpoint_path):
@@ -201,8 +203,14 @@ class StyleEncoder(nn.Module):
             embedding_dim = config['embedding_dim']
             code_dim = config['code_dim']
             hidden_dim = config['hidden_dim']
+            num_layers = config['num_layers']
 
-        encoder = cls(embedding_dim=embedding_dim, code_dim=code_dim, hidden_dim=hidden_dim)
+        encoder = cls(
+            embedding_dim=embedding_dim,
+            code_dim=code_dim,
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+        )
         encoder.load_state_dict(torch.load(path / 'model.pt'))
         return encoder
 
@@ -220,9 +228,11 @@ class StyleEncoder(nn.Module):
         title_pos_ids = torch.tensor(title_pos_ids, device='cuda').long()
         title_pos_embeds = self.embedding(title_pos_ids)
 
-        _, hc = self.bilstm(title_pos_embeds)
-        h = torch.cat([hc[0][0], hc[0][1]], dim=1)
-        output = self.fc(h)
+        _, hc = self.lstm(title_pos_embeds)
+        # (num_layers * num_directions, batch_size, hidden_dim)
+        h = hc[0]
+        hidden = h.permute(1, 0, 2).reshape(-1, self.num_layers * 2 * self.hidden_dim)
+        output = self.fc(hidden)
 
         mean, std = torch.chunk(output, 2, dim=1)
         std = F.softplus(std)

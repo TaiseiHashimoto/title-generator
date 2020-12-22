@@ -210,6 +210,7 @@ if __name__ == '__main__':
     parser.add_argument('--pretrain', action='store_true')
     parser.add_argument('--styenc_embedding_dim', type=int, default=64)
     parser.add_argument('--styenc_code_dim', type=int, default=64)
+    parser.add_argument('--styenc_num_layers', type=int, default=1)
     parser.add_argument('--styenc_hidden_dim', type=int, default=128)
     parser.add_argument('--styenc_lr', type=float, default=1e-4)
     parser.add_argument('--styenc_lr_pre', type=float, default=1e-4)
@@ -240,8 +241,9 @@ if __name__ == '__main__':
     if args.encode_style:
         style_encoder = StyleEncoder(
             embedding_dim=args.styenc_embedding_dim,
-            hidden_dim=args.styenc_hidden_dim,
             code_dim=args.styenc_code_dim,
+            num_layers=args.styenc_num_layers,
+            hidden_dim=args.styenc_hidden_dim,
         ).to(device)
     if args.encode_style and args.pretrain:
         style_decoder = StyleDecoder(
@@ -269,6 +271,7 @@ if __name__ == '__main__':
         'pretrain': args.pretrain,
         'styenc_embedding_dim': args.styenc_embedding_dim,
         'styenc_code_dim': args.styenc_code_dim,
+        'styenc_num_layers': args.styenc_num_layers,
         'styenc_hidden_dim': args.styenc_hidden_dim,
         'styenc_lr': args.styenc_lr,
         'styenc_lr_pre': args.styenc_lr_pre,
