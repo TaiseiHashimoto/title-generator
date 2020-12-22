@@ -27,7 +27,7 @@ def div_from_prior(posterior):
     return kl_divergence(posterior, prior).sum(dim=-1)
 
 
-def evaluate_tf(update_step):
+def evaluate_pre(update_step):
     encoder.eval()
     decoder.eval()
     ce_loss_all = []
@@ -83,7 +83,7 @@ def train():
                 mlflow.log_metric('styenc_scale', styenc_scale, update_step)
 
             if update_step % args.eval_freq == 0:
-                evaluate_tf(update_step)
+                evaluate_pre(update_step)
 
         eta_hour, eta_min, eta_sec = timekeeper.get_eta(epoch)
         print(f"Epoch {epoch} done. ETA: {eta_hour:02d}:{eta_min:02d}:{eta_sec:02d}", flush=True)
