@@ -183,10 +183,13 @@ def train():
                 mlflow.log_metric('loss_train', loss.item(), update_step)
                 if args.encode_style:
                     mlflow.log_metric('kl_loss_train', kl_loss.item(), update_step)
-                    styenc_loc = style_code_dist.loc.abs().mean().item()
-                    styenc_scale = style_code_dist.scale.mean().item()
-                    mlflow.log_metric('styenc_loc_train', styenc_loc, update_step)
-                    mlflow.log_metric('styenc_scale_train', styenc_scale, update_step)
+                    styenc_mean = style_code_dist.loc.abs().mean().item()
+                    styenc_std = style_code_dist.scale.mean().item()
+                    mlflow.log_metric('styenc_mean_train', styenc_mean, update_step)
+                    mlflow.log_metric('styenc_std_train', styenc_std, update_step)
+                    scales = style_encoder.scales.detach().cpu().numpy()
+                    mlflow.log_metric('styenc_scale_src_train', scales[0], update_step)
+                    mlflow.log_metric('styenc_scale_tgt_train', scales[1], update_step)
 
             if update_step % args.eval_freq == 0:
                 evaluate_tf(update_step)
