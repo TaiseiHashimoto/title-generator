@@ -5,3 +5,5 @@ __pycache__/
 sftp-config.json
 *.sh
 tmp*.py
+in.txt
+/checkpoint

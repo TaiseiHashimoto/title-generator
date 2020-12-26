@@ -36,6 +36,14 @@ def split_data(data_all, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1, seed=12
     return data_train, data_val, data_test
 
 
+def replace_special_tokens(sentence):
+    sentence = sentence.replace('\\', '//')
+    sentence = sentence.replace('{', '(')
+    sentence = sentence.replace('}', ')')
+    sentence = sentence.replace('^', '')
+    return sentence
+
+
 class arXivDataLoader():
     def __init__(self, data, batch_size):
         self.data = data

@@ -1,18 +1,17 @@
 import argparse
 import mlflow
-import torch
 import numpy as np
-from transformers import (
-    PegasusForConditionalGeneration,
-    PegasusTokenizer,
-    Adafactor,
-)
+import torch
 from datasets import load_metric
 import pickle
 from pathlib import Path
 import tempfile
 
-from models import arXivModel
+from models import (
+    arXivModel,
+    Summarizer,
+    StyleEncoder,
+)
 import utils
 
 
@@ -20,7 +19,7 @@ def evaluate_gen(num_samples=20):
     metric = load_metric("rouge", experiment_id=run.info.run_id)
     samples = []
 
-    for batch_raw in data_val:
+    for batch_raw in data_test:
         generated = model.generate(batch_raw, num_beams=args.num_beams)
         metric.add_batch(predictions=generated, references=batch_raw['title'])
 
@@ -68,13 +67,11 @@ if __name__ == '__main__':
     parser.add_argument('--num_beams', type=int, default=4)
     args = parser.parse_args()
 
-    device = 'cuda'
-
     with open('data/preprocessed.pkl', 'rb') as f:
         data = pickle.load(f)
 
-    _, data_val, _ = utils.split_data(data)
-    data_val = utils.arXivDataLoader(data_val, args.batch_size)
+    _, _, data_test = utils.split_data(data)
+    data_test = utils.arXivDataLoader(data_test, args.batch_size)
     print("data loaded", flush=True)
 
     model = arXivModel.from_checkpoint(args.checkpoint_path, device='cuda')
@@ -88,4 +85,5 @@ if __name__ == '__main__':
         'num_beams': args.num_beams,
     })
 
+    print("test start", flush=True)
     evaluate_gen()

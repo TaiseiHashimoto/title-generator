@@ -20,26 +20,24 @@ PegasusForConditionalGeneration._keys_to_ignore_on_save = []
 
 
 class arXivModel():
-    def __init__(self,
-        summarizer=None,
+    def __init__(
+        self,
+        summarizer,
         style_encoder=None,
-        style_decoder=None,
     ):
-        self.set_summarizer(summarizer)
-        self.style_encoder = style_encoder
-        self.style_decoder = style_decoder
-
-    def set_summarizer(self, summarizer):
         self.summarizer = summarizer
-        if summarizer is not None:
-            self.summarizer._keys_to_ignore_on_load_missing = []
-            self.summarizer._keys_to_ignore_on_save = []
+        self.style_encoder = style_encoder
+
+        self.summarizer._keys_to_ignore_on_load_missing = []
+        self.summarizer._keys_to_ignore_on_save = []
 
     @classmethod
     def from_checkpoint(cls, checkpoint_path, device='cuda'):
         summarizer = Summarizer.from_checkpoint(checkpoint_path).to(device)
-        style_encoder = StyleEncoder.from_checkpoint(checkpoint_path).to(device)
-        return cls(summarizer=summarizer, style_encoder=style_encoder)
+        style_encoder = StyleEncoder.from_checkpoint(checkpoint_path)
+        if style_encoder is not None:
+            style_encoder.to(device)
+        return cls(summarizer, style_encoder)
 
     def get_style_code(self, batch_raw):
         if self.style_encoder is not None:
@@ -49,11 +47,6 @@ class arXivModel():
         else:
             return None, None
 
-    def forward_pretrain(self, batch_raw):
-        style_code_dist, style_code = self.get_style_code(batch_raw)
-        loss = self.style_decoder(batch_raw, style_code)
-        return loss, style_code_dist, style_code
-
     def forward_train(self, batch_raw):
         style_code_dist, style_code = self.get_style_code(batch_raw)
         scales = self.style_encoder.scales if self.style_encoder is not None else None
@@ -61,15 +54,17 @@ class arXivModel():
         return outputs.loss, style_code_dist, style_code
 
     @torch.no_grad()
-    def generate(self, batch_raw, num_beams):
-        style_code_dist, style_code = self.get_style_code(batch_raw)
+    def generate(self, batch_raw, style_code=None, num_beams=None):
+        if style_code is None:
+            style_code_dist, style_code = self.get_style_code(batch_raw)
         scales = self.style_encoder.scales if self.style_encoder is not None else None
         generated = self.summarizer.generate(batch_raw, style_code, scales, num_beams=num_beams)
         return generated
 
     def save(self, checkpoint_path):
         self.summarizer.save(checkpoint_path)
-        self.style_encoder.save(checkpoint_path)
+        if self.style_encoder is not None:
+            self.style_encoder.save(checkpoint_path)
 
 
 class Summarizer(nn.Module):
@@ -83,30 +78,14 @@ class Summarizer(nn.Module):
         return cls(Path(checkpoint_path, 'model'))
 
     def encode(self, batch, style_code=None, scales=None):
-        inputs_embeds = self.model.model.shared(batch['input_ids'])
-        inputs_embeds = inputs_embeds * self.model.model.encoder.embed_scale
-
-        if style_code is not None:
-            style_code_rep = style_code.repeat(1, self.model.config.d_model // style_code.shape[1])
-            inputs_embeds = torch.cat([
-                # style_code_rep.unsqueeze(dim=1) * 3.,  # TODO: value ok?
-                style_code_rep.unsqueeze(dim=1) * scales[0],
-                inputs_embeds,
-            ], dim=1)
-            batch['attention_mask'] = torch.cat([
-                torch.ones_like(batch['attention_mask'][:, :1]),
-                batch['attention_mask'],
-            ], dim=1)
-
         encoder_outputs = self.model.model.encoder(
-            # input_ids=batch['input_ids'],
-            inputs_embeds=inputs_embeds,
+            input_ids=batch['input_ids'],
             attention_mask=batch['attention_mask'],
         )
 
         if style_code is not None:
+            style_code_rep = style_code.repeat(1, self.model.config.d_model // style_code.shape[1])
             encoder_outputs.last_hidden_state = torch.cat([
-                # style_code_rep.unsqueeze(dim=1) * 0.2,  # TODO: value ok?
                 style_code_rep.unsqueeze(dim=1) * scales[1],
                 encoder_outputs.last_hidden_state,
             ], dim=1)
@@ -121,7 +100,7 @@ class Summarizer(nn.Module):
         batch = self.tokenizer.prepare_seq2seq_batch(
             src_texts=batch_raw['abstract'],
             tgt_texts=batch_raw['title'],
-            max_length=self.tokenizer.model_max_length-2,  # save room for style code
+            max_length=self.tokenizer.model_max_length-1,  # save room for style code
             return_tensors="pt",
         ).to('cuda')
 
@@ -138,7 +117,7 @@ class Summarizer(nn.Module):
     def generate(self, batch_raw, style_code=None, scales=None, num_beams=None, decoder_start_token_id=None):
         batch = self.tokenizer.prepare_seq2seq_batch(
             src_texts=batch_raw['abstract'],
-            max_length=self.tokenizer.model_max_length-2,  # save room for style code
+            max_length=self.tokenizer.model_max_length-1,  # save room for style code
             return_tensors="pt",
         ).to('cuda')
 
@@ -213,7 +192,7 @@ class StyleEncoder(nn.Module):
         self.lstm = nn.LSTM(embedding_dim, hidden_dim, num_layers=num_layers, batch_first=True, bidirectional=True)
         self.fc = nn.Linear((hidden_dim * 2) * num_layers, code_dim * 2)
         # TODO: value ok?
-        self.log_scales = nn.Parameter(torch.tensor([3., 0.2]).log())
+        self.log_scales = nn.Parameter(torch.tensor([3., 0.15]).log())
 
     @classmethod
     def from_checkpoint(cls, checkpoint_path):
@@ -226,7 +205,8 @@ class StyleEncoder(nn.Module):
             embedding_dim = config['embedding_dim']
             code_dim = config['code_dim']
             hidden_dim = config['hidden_dim']
-            num_layers = config['num_layers']
+            # num_layers = config['num_layers']
+            num_layers = 1
 
         encoder = cls(
             embedding_dim=embedding_dim,
@@ -264,8 +244,7 @@ class StyleEncoder(nn.Module):
         output = self.fc(hidden)
 
         mean, std = torch.chunk(output, 2, dim=1)
-        # std = F.softplus(std)
-        std = torch.sigmoid(std)  # TODO; sigmoid?
+        std = F.softplus(std)
         return Normal(mean, std)
 
     def save(self, checkpoint_path):
@@ -280,58 +259,3 @@ class StyleEncoder(nn.Module):
             }, f, indent=4)
 
         torch.save(self.state_dict(), path / 'model.pt')
-
-
-class StyleDecoder(nn.Module):
-    def __init__(
-        self,
-        embedding,
-        code_dim,
-        hidden_dim,
-    ):
-        super().__init__()
-        with open('data/pos_list.json', 'r') as f:
-            pos_list = json.load(f)
-            self.pos_voc = {'<pad>': 0}
-            self.pos_voc.update({pos: i + 1 for i, pos in enumerate(pos_list)})
-
-        self.embedding = embedding
-        self.lstm = nn.LSTM(self.embedding.embedding_dim, hidden_dim, batch_first=True)
-        self.fc_in = nn.Linear(code_dim, hidden_dim)
-        self.fc_out = nn.Linear(hidden_dim, len(self.pos_voc))
-
-    def forward(self, batch_raw, style_code):
-        title_pos = batch_raw['title_pos']
-        max_len = max([len(tp) for tp in title_pos])
-
-        # pad title POS sequence
-        title_pos_ids = []
-        masks = []
-        for tp in title_pos:
-            pad_len = max_len - len(tp)
-            tp_id = [self.pos_voc['<pad>']] + \
-                     [self.pos_voc[p] for p in tp] + \
-                     [self.pos_voc['<pad>']] * pad_len
-            title_pos_ids.append(tp_id)
-            mask = [1.] * (len(tp) + 1) + [0.] * pad_len
-            masks.append(mask)
-
-        title_pos_ids = torch.tensor(title_pos_ids, device='cuda').long()
-        title_pos_embeds = self.embedding(title_pos_ids)
-        masks = torch.tensor(masks, device='cuda').float()
-
-        h0 = self.fc_in(style_code).unsqueeze(dim=0)
-        c0 = torch.zeros_like(h0)
-
-        output, _ = self.lstm(title_pos_embeds, (h0, c0))
-        logits = self.fc_out(output)
-
-        title_pos_target = title_pos_ids.roll(-1, dims=1)
-        loss = F.cross_entropy(
-            logits.view(-1, len(self.pos_voc)),
-            title_pos_target.view(-1),
-            reduction='none',
-        ).view(*masks.shape)
-        loss = (loss * masks).mean()
-
-        return loss

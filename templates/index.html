@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Title Generater</title>
+  </head>
+  <body>
+    <form action="/" method="post">
+      <p>
+        <textarea name="abstract" rows="12" cols="100" placeholder="Enter abstract here!">{{ abstract }}</textarea>
+      </p>
+      <p>
+        <input type="submit" value="Generate">
+      </p>
+    </form>
+
+    {% for sample in samples %}
+      <p>
+        {{ sample.generated }}<br>
+        <span style="color: gray">[template] {{ sample.template }}</span>
+      </p>
+    {% endfor %}
+  </body>
+</html>

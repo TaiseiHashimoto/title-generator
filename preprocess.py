@@ -3,6 +3,8 @@ import nltk
 from tqdm import tqdm
 import pickle
 
+import utils
+
 
 def get_line_number(file_name):
     line_counter = 0
@@ -10,14 +12,6 @@ def get_line_number(file_name):
         for line in f:
             line_counter += 1
     return line_counter
-
-
-def replace_special_tokens(sentence):
-    sentence = sentence.replace('\\', '//')
-    sentence = sentence.replace('{', '(')
-    sentence = sentence.replace('}', ')')
-    sentence = sentence.replace('^', '')
-    return sentence
 
 
 if __name__ == '__main__':
@@ -49,8 +43,8 @@ if __name__ == '__main__':
 
             abstract = paper['abstract'].strip().replace('\n', ' ')
             title = paper['title'].strip().replace('\n  ', ' ')
-            abstract = replace_special_tokens(abstract)
-            title = replace_special_tokens(title)
+            abstract = utils.replace_special_tokens(abstract)
+            title = utils.replace_special_tokens(title)
             abstract_len = len(abstract.split())
             title_len = len(title.split())
 
